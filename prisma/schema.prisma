@@ -1,0 +1,534 @@
+// =====================================================================
+// FactoryFlow — Smart Manufacturing Operations & PCB Traceability Platform
+// Database schema (PostgreSQL)
+//
+// NOTE: Phase 1 ships against typed mock fixtures in `src/lib/mock-data/`
+// (see src/lib/types.ts — interfaces mirror these models 1:1). Connect a
+// real Postgres instance (Neon/Supabase) via DATABASE_URL and run
+// `prisma migrate dev` to switch the app over to live data; see
+// prisma/seed.ts for how mock fixtures map to seed rows.
+//
+// Extension beyond the original 16-table spec: `InspectionRecord` —
+// required by the PCB Traceability "inspection history" view and modeled
+// on the user's prior Bosch SPI (Solder Paste Inspection) tool, which
+// produced per-pin height/volume/area measurements and defect typing.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =====================================================================
+// ENUMS
+// =====================================================================
+
+enum RoleName {
+  OPERATOR
+  SUPERVISOR
+  ENGINEER
+  QUALITY_ENGINEER
+  PLANT_MANAGER
+  DIRECTOR
+  ADMIN
+}
+
+/// Production line run state — drives the status color system
+/// (RUNNING=green, HOLD=orange, MAINTENANCE=blue, OFFLINE=gray).
+enum LineStatus {
+  RUNNING
+  IDLE
+  HOLD
+  MAINTENANCE
+  OFFLINE
+}
+
+enum MachineType {
+  PRINTER
+  SPI
+  PLACEMENT
+  REFLOW
+  AOI
+  ICT
+  FCT
+  DEPANEL
+}
+
+/// Machine status — RUNNING=green, WARNING=yellow, HOLD=orange,
+/// CRITICAL=red, OFFLINE=gray.
+enum MachineStatus {
+  RUNNING
+  WARNING
+  HOLD
+  CRITICAL
+  OFFLINE
+}
+
+enum BoardStatus {
+  IN_PROGRESS
+  COMPLETED
+  HOLD
+  REWORK
+  XOUT
+  SHIPPED
+}
+
+enum WorkOrderStatus {
+  PLANNED
+  RELEASED
+  IN_PROGRESS
+  COMPLETED
+  CLOSED
+  ON_HOLD
+}
+
+/// Traceability event types recorded every time a board's DMC is scanned.
+enum DMCEventType {
+  PANEL_LOADED
+  STATION_ENTRY
+  STATION_EXIT
+  INSPECTION
+  HOLD_APPLIED
+  HOLD_RELEASED
+  REWORK_START
+  REWORK_COMPLETE
+  XOUT_FLAGGED
+  SHIPPED
+}
+
+enum AlertSeverity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum InspectionResult {
+  PASS
+  WARNING
+  FAIL
+}
+
+/// Mirrors the defect taxonomy from the SPI inspection tool.
+enum DefectType {
+  NONE
+  INSUFFICIENT
+  EXCESSIVE
+  BRIDGING
+  MISSING
+  MISALIGNED
+  TOMBSTONE
+}
+
+enum XOutReasonCode {
+  SOLDER_DEFECT
+  COMPONENT_DEFECT
+  MISALIGNMENT
+  DAMAGE
+  CONTAMINATION
+  WRONG_PART
+  OTHER
+}
+
+enum ReworkStatus {
+  QUEUED
+  IN_PROGRESS
+  COMPLETED
+  SCRAPPED
+}
+
+enum EventSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+// =====================================================================
+// ACCESS CONTROL
+// =====================================================================
+
+model Role {
+  id          String   @id @default(cuid())
+  name        RoleName @unique
+  description String?
+  permissions Json     @default("{}")
+
+  users User[]
+
+  @@map("roles")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  roleId       String
+  role         Role     @relation(fields: [roleId], references: [id])
+  factoryId    String?
+  factory      Factory? @relation(fields: [factoryId], references: [id])
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditLogs          AuditLog[]
+  dmcRecords         DMCRecord[]
+  acknowledgedAlerts Alert[]       @relation("AlertAcknowledgedBy")
+  resolvedAlerts     Alert[]       @relation("AlertResolvedBy")
+  reworkAssignments  ReworkBoard[] @relation("ReworkAssignedTo")
+  xOutReports        XOutBoard[]   @relation("XOutReportedBy")
+
+  @@index([factoryId])
+  @@map("users")
+}
+
+// =====================================================================
+// FACTORY / LINE / MACHINE
+// =====================================================================
+
+model Factory {
+  id        String   @id @default(cuid())
+  name      String
+  code      String   @unique
+  location  String
+  timezone  String   @default("Asia/Kolkata")
+  createdAt DateTime @default(now())
+
+  productionLines  ProductionLine[]
+  users            User[]
+  alerts           Alert[]
+  auditLogs        AuditLog[]
+  productionEvents ProductionEvent[]
+  rackLocations    RackLocation[]
+
+  @@map("factories")
+}
+
+model ProductionLine {
+  id                String     @id @default(cuid())
+  factoryId         String
+  factory           Factory    @relation(fields: [factoryId], references: [id])
+  name              String
+  code              String     @unique
+  status            LineStatus @default(OFFLINE)
+  /// Target boards/hour for OEE & utilization calculations
+  targetThroughput  Int
+  currentThroughput Int        @default(0)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  machines         Machine[]
+  workOrders       WorkOrder[]
+  wipRecords       WIPRecord[]
+  alerts           Alert[]
+  productionEvents ProductionEvent[]
+  dmcRecords       DMCRecord[]
+
+  @@index([factoryId])
+  @@map("production_lines")
+}
+
+model Machine {
+  id            String         @id @default(cuid())
+  lineId        String
+  line          ProductionLine @relation(fields: [lineId], references: [id])
+  name          String
+  type          MachineType
+  /// Station order on the line (1 = first station, e.g. Printer)
+  sequence      Int
+  status        MachineStatus  @default(OFFLINE)
+  lastHeartbeat DateTime?
+  metadata      Json           @default("{}")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  productionEvents  ProductionEvent[]
+  dmcRecords        DMCRecord[]
+  inspectionRecords InspectionRecord[]
+  alerts            Alert[]
+
+  @@unique([lineId, sequence])
+  @@index([lineId])
+  @@map("machines")
+}
+
+// =====================================================================
+// WORK ORDERS / BOARDS
+// =====================================================================
+
+model WorkOrder {
+  id                String          @id @default(cuid())
+  orderNumber       String          @unique
+  partNumber        String
+  productName       String
+  lineId            String
+  line              ProductionLine  @relation(fields: [lineId], references: [id])
+  quantityPlanned   Int
+  quantityCompleted Int             @default(0)
+  status            WorkOrderStatus @default(PLANNED)
+  startDate         DateTime
+  dueDate           DateTime
+  createdAt         DateTime        @default(now())
+
+  boards Board[]
+
+  @@index([lineId])
+  @@map("work_orders")
+}
+
+model Board {
+  id               String       @id @default(cuid())
+  /// 16-digit numeric Data Matrix Code — primary traceability key
+  dmcNumber        String       @unique
+  serialNumber     String       @unique
+  batchNumber      String
+  partNumber       String
+  revision         String       @default("A")
+  workOrderId      String
+  workOrder        WorkOrder    @relation(fields: [workOrderId], references: [id])
+  status           BoardStatus  @default(IN_PROGRESS)
+  currentLineId    String?
+  currentMachineId String?
+  currentBinId     String?
+  currentBin       BinLocation? @relation(fields: [currentBinId], references: [id])
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  dmcRecords        DMCRecord[]
+  wipRecord         WIPRecord?
+  xOutRecord        XOutBoard?
+  reworkRecords     ReworkBoard[]
+  inspectionRecords InspectionRecord[]
+  productionEvents  ProductionEvent[]
+
+  @@index([batchNumber])
+  @@index([workOrderId])
+  @@index([currentBinId])
+  @@map("boards")
+}
+
+/// Append-only scan/event log per board — the source of truth for the
+/// PCB Traceability "production history" timeline.
+model DMCRecord {
+  id          String          @id @default(cuid())
+  boardId     String
+  board       Board           @relation(fields: [boardId], references: [id])
+  dmcNumber   String
+  lineId      String?
+  line        ProductionLine? @relation(fields: [lineId], references: [id])
+  machineId   String?
+  machine     Machine?        @relation(fields: [machineId], references: [id])
+  stationCode String
+  eventType   DMCEventType
+  operatorId  String?
+  operator    User?           @relation(fields: [operatorId], references: [id])
+  notes       String?
+  timestamp   DateTime        @default(now())
+
+  @@index([boardId])
+  @@index([dmcNumber])
+  @@index([timestamp])
+  @@map("dmc_records")
+}
+
+/// Current WIP position for a board — one row per active board, powers
+/// the WIP Monitoring page (aging, bottlenecks, holds).
+model WIPRecord {
+  id               String         @id @default(cuid())
+  boardId          String         @unique
+  board            Board          @relation(fields: [boardId], references: [id])
+  lineId           String
+  line             ProductionLine @relation(fields: [lineId], references: [id])
+  currentStation   String
+  enteredStationAt DateTime       @default(now())
+  isBottleneck     Boolean        @default(false)
+  isOnHold         Boolean        @default(false)
+  holdReason       String?
+  updatedAt        DateTime       @updatedAt
+
+  @@index([lineId])
+  @@map("wip_records")
+}
+
+// =====================================================================
+// RACK & BIN MANAGEMENT
+// =====================================================================
+
+model RackLocation {
+  id        String   @id @default(cuid())
+  factoryId String
+  factory   Factory  @relation(fields: [factoryId], references: [id])
+  code      String   @unique
+  name      String
+  zone      String
+  totalBins Int
+  createdAt DateTime @default(now())
+
+  bins BinLocation[]
+
+  @@index([factoryId])
+  @@map("rack_locations")
+}
+
+model BinLocation {
+  id       String       @id @default(cuid())
+  rackId   String
+  rack     RackLocation @relation(fields: [rackId], references: [id])
+  /// e.g. "A1-03"
+  code     String
+  capacity Int          @default(1)
+  occupied Int          @default(0)
+
+  boards Board[]
+
+  @@unique([rackId, code])
+  @@map("bin_locations")
+}
+
+// =====================================================================
+// QUALITY: X-OUT, REWORK, INSPECTION
+// =====================================================================
+
+model XOutBoard {
+  id             String         @id @default(cuid())
+  boardId        String         @unique
+  board          Board          @relation(fields: [boardId], references: [id])
+  reasonCode     XOutReasonCode
+  /// Reference designator / panel coordinate, e.g. "U12", "R45"
+  defectLocation String
+  description    String
+  /// Estimated cost impact in local currency
+  impactValue    Float
+  disposition    String?
+  reportedById   String
+  reportedBy     User           @relation("XOutReportedBy", fields: [reportedById], references: [id])
+  reportedAt     DateTime       @default(now())
+
+  @@map("xout_boards")
+}
+
+model ReworkBoard {
+  id            String       @id @default(cuid())
+  boardId       String
+  board         Board        @relation(fields: [boardId], references: [id])
+  reworkStation String
+  reason        String
+  status        ReworkStatus @default(QUEUED)
+  assignedToId  String?
+  assignedTo    User?        @relation("ReworkAssignedTo", fields: [assignedToId], references: [id])
+  startedAt     DateTime?
+  completedAt   DateTime?
+  notes         String?
+  createdAt     DateTime     @default(now())
+
+  @@index([boardId])
+  @@map("rework_boards")
+}
+
+/// SPI/AOI inspection result — `pinData` mirrors the InspectionPin[]
+/// shape from the prior Bosch SPI tool (pinId, x, y, height, volume,
+/// area, status, defectType).
+model InspectionRecord {
+  id         String           @id @default(cuid())
+  boardId    String
+  board      Board            @relation(fields: [boardId], references: [id])
+  dmcNumber  String
+  machineId  String
+  machine    Machine          @relation(fields: [machineId], references: [id])
+  result     InspectionResult
+  totalPins  Int
+  defectPins Int
+  /// microns
+  avgHeight  Float
+  /// mm^3
+  avgVolume  Float
+  /// mm^2
+  avgArea    Float
+  pinData    Json
+  timestamp  DateTime         @default(now())
+
+  @@index([boardId])
+  @@index([dmcNumber])
+  @@map("inspection_records")
+}
+
+// =====================================================================
+// EVENTS, ALERTS, AUDIT
+// =====================================================================
+
+/// Generic factory activity feed — powers the Command Center activity
+/// timeline and Executive Dashboard recent-activity widgets.
+model ProductionEvent {
+  id        String          @id @default(cuid())
+  factoryId String
+  factory   Factory         @relation(fields: [factoryId], references: [id])
+  lineId    String?
+  line      ProductionLine? @relation(fields: [lineId], references: [id])
+  machineId String?
+  machine   Machine?        @relation(fields: [machineId], references: [id])
+  boardId   String?
+  board     Board?          @relation(fields: [boardId], references: [id])
+  /// e.g. "MACHINE_START", "BOARD_COMPLETED", "LINE_HOLD"
+  eventType String
+  severity  EventSeverity   @default(INFO)
+  message   String
+  metadata  Json            @default("{}")
+  timestamp DateTime        @default(now())
+
+  @@index([factoryId, timestamp])
+  @@index([lineId])
+  @@map("production_events")
+}
+
+model Alert {
+  id               String          @id @default(cuid())
+  factoryId        String
+  factory          Factory         @relation(fields: [factoryId], references: [id])
+  lineId           String?
+  line             ProductionLine? @relation(fields: [lineId], references: [id])
+  machineId        String?
+  machine          Machine?        @relation(fields: [machineId], references: [id])
+  severity         AlertSeverity
+  status           AlertStatus     @default(OPEN)
+  title            String
+  message          String
+  acknowledgedById String?
+  acknowledgedBy   User?           @relation("AlertAcknowledgedBy", fields: [acknowledgedById], references: [id])
+  acknowledgedAt   DateTime?
+  resolvedById     String?
+  resolvedBy       User?           @relation("AlertResolvedBy", fields: [resolvedById], references: [id])
+  resolvedAt       DateTime?
+  createdAt        DateTime        @default(now())
+
+  @@index([factoryId, status])
+  @@index([lineId])
+  @@map("alerts")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  factoryId  String?
+  factory    Factory? @relation(fields: [factoryId], references: [id])
+  /// e.g. "BOARD_STATUS_UPDATE", "ALERT_ACKNOWLEDGED", "ROLE_CHANGED"
+  action     String
+  entityType String
+  entityId   String
+  details    Json     @default("{}")
+  ipAddress  String?
+  timestamp  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@map("audit_logs")
+}

@@ -2,6 +2,8 @@
 
 **An Industry 4.0 MES-style operations console for SMT/PCB assembly plants** — real-time line status, machine health, work order tracking, and full DMC-level board traceability, styled after Bosch Nexeed, Siemens Opcenter, and Palantir Foundry-class operations consoles.
 
+### [🔗 Live Demo](https://factoryflow-one.vercel.app)
+
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)

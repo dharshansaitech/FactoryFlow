@@ -2,6 +2,7 @@
 
 This folder holds the images referenced from the root `README.md`:
 
+- `command-center-demo.gif` — Factory Command Center, live simulation (animated)
 - `dashboard.png` — Executive Dashboard (`/`)
 - `command-center.png` — Factory Command Center (`/command-center`)
 - `traceability.png` — PCB Traceability (`/traceability`)
@@ -19,6 +20,6 @@ This folder holds the images referenced from the root `README.md`:
 3. Crop/resize to ~1600x1000 and save as the filenames above (PNG, <500KB each
    recommended for fast README loads).
 
-> These images are not yet committed. Until they're added, the Screenshots
-> section in the root README will show broken image links — capture and add
-> them before the repo is shared publicly.
+4. For the demo GIF, record `/command-center` with Playwright's `recordVideo`,
+   extract frames with ffmpeg, and re-encode to GIF with a pure-JS encoder
+   (e.g. `gifenc` + `pngjs`) since minimal ffmpeg builds often lack a GIF muxer.

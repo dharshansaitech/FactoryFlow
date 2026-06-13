@@ -9,8 +9,15 @@
 ![Prisma](https://img.shields.io/badge/Prisma-7-2D3748?logo=prisma&logoColor=white)
 ![Zustand](https://img.shields.io/badge/State-Zustand-443E38)
 ![License](https://img.shields.io/badge/License-MIT-22C55E)
+![Status](https://img.shields.io/badge/Status-UI%20Complete%20(Phases%201–4)%20·%20Backend%20Planned-3B82F6)
 
 ---
+
+## Demo
+
+![Factory Command Center live demo](docs/screenshots/command-center-demo.gif)
+
+> Live, ticking factory floor — line cards, machine tiles, OEE/throughput, and the alert feed all update in real time via a Zustand simulation loop.
 
 ## Overview
 
